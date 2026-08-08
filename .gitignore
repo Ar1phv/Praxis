@@ -1,0 +1,23 @@
+# .gitignore
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Editor
+.vscode/
+
+# OS
+.DS_Store
