@@ -11,3 +11,4 @@ Primary concept: "Execution" — a unit of work that progresses through:
 Idea → Planning → Architecture → Build → Testing → Review → Delivery
 
 This repository contains the foundational structure, documentation, and guidelines to begin building Praxis.
+ 
