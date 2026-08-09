@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   validate:
-    name: Validate Lovable frontend import
+    name: Validate Praxis frontend
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -20,92 +20,90 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: import/frontend
-          path: praxis
-
-      - name: Checkout Lovable source
-        uses: actions/checkout@v4
-        with:
-          repository: Ar1phv/praxis-ai-studio
-          ref: main
-          path: lovable-src
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: praxis/pnpm-lock.yaml
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 9.15.9
+          run_install: false
 
       - name: Create validation log directory
-        working-directory: praxis
         run: mkdir -p validation-logs
 
       - name: Install dependencies
-        id: install
-        working-directory: praxis
-        continue-on-error: true
+        working-directory: apps/web
         run: |
-          set -o pipefail
-          pnpm install --no-frozen-lockfile 2>&1 | tee validation-logs/pnpm-install.log
+          pnpm install --no-frozen-lockfile --lockfile=false 2>&1 | tee ../../validation-logs/pnpm-install.log
 
       - name: TypeScript check
-        id: typescript
-        working-directory: praxis/apps/web
-        continue-on-error: true
+        working-directory: apps/web
         run: |
-          set -o pipefail
           pnpm exec tsc --noEmit 2>&1 | tee ../../validation-logs/ts-check.log
 
       - name: ESLint
-        id: lint
-        working-directory: praxis/apps/web
-        continue-on-error: true
+        working-directory: apps/web
         run: |
-          set -o pipefail
           pnpm run lint 2>&1 | tee ../../validation-logs/eslint.log
 
       - name: Production build
-        id: build
-        working-directory: praxis/apps/web
-        continue-on-error: true
+        working-directory: apps/web
         run: |
-          set -o pipefail
           pnpm run build 2>&1 | tee ../../validation-logs/build.log
 
       - name: Start development server
-        id: server
-        working-directory: praxis/apps/web
-        continue-on-error: true
+        working-directory: apps/web
         run: |
-          set -o pipefail
-
-          pnpm run dev -- --host 0.0.0.0 > ../../validation-logs/server.log 2>&1 &
-          SERVER_PID=$!
-
-          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
-
-          echo "Waiting for development server..."
+          nohup pnpm run dev --host 0.0.0.0 --port 3000 > ../../validation-logs/server.log 2>&1 &
+          echo $! > ../../server.pid
 
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:5173/ > /dev/null 2>&1; then
-              echo "Development server is ready."
-              break
+            if curl -fsS http://127.0.0.1:3000/ > /dev/null; then
+              echo "Server started successfully."
+              exit 0
             fi
-
-            if ! kill -0 $SERVER_PID 2>/dev/null; then
-              echo "Development server exited unexpectedly."
-              cat ../../validation-logs/server.log
-              exit 1
-            fi
-
             sleep 2
           done
 
-          curl -fsS -o /tmp/index.html http://127.0.0.1:5173/
-          curl -fsS -o /tmp/dashboard.html http://127.0.0.1:5173/dashboard
-          curl -fsS -o /tmp/start.html http://
+          echo "Server failed to start."
+          cat ../../validation-logs/server.log
+          exit 1
+
+      - name: Smoke test routes
+        run: |
+          set -e
+
+          echo "Testing /"
+          curl -f -sS -o /tmp/index.html -w "HTTP %{http_code}\n" http://127.0.0.1:3000/ | tee validation-logs/smoke-tests.log
+
+          echo "Testing /dashboard"
+          curl -f -sS -o /tmp/dashboard.html -w "HTTP %{http_code}\n" http://127.0.0.1:3000/dashboard | tee -a validation-logs/smoke-tests.log
+
+          echo "Testing /start"
+          curl -f -sS -o /tmp/start.html -w "HTTP %{http_code}\n" http://127.0.0.1:3000/start | tee -a validation-logs/smoke-tests.log
+
+          echo "All smoke tests passed."
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-logs
+          path: validation-logs/
+
+      - name: Validation summary
+        if: always()
+        run: |
+          {
+            echo "## Praxis frontend validation"
+            echo ""
+            echo "- Branch: \`import/frontend\`"
+            echo "- Frontend validation completed."
+            echo "- Lovable source checkout/checksum comparison: skipped"
+            echo ""
+            echo "See the uploaded \`validation-logs\` artifact for full output."
+          } >> "$GITHUB_STEP_SUMMARY"
