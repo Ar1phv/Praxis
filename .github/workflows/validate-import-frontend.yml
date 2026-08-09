@@ -15,8 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
+    defaults:
+      run:
+        working-directory: apps/web
+
     steps:
-      - name: Checkout Praxis import branch
+      - name: Checkout import/frontend
         uses: actions/checkout@v4
         with:
           ref: import/frontend
@@ -33,60 +37,108 @@ jobs:
           run_install: false
 
       - name: Create validation log directory
+        working-directory: .
         run: mkdir -p validation-logs
 
       - name: Install dependencies
-        working-directory: apps/web
         run: |
-          pnpm install --no-frozen-lockfile --lockfile=false 2>&1 | tee ../../validation-logs/pnpm-install.log
+          pnpm install --no-frozen-lockfile --lockfile=false \
+            2>&1 | tee ../../validation-logs/pnpm-install.log
 
       - name: TypeScript check
-        working-directory: apps/web
         run: |
-          pnpm exec tsc --noEmit 2>&1 | tee ../../validation-logs/ts-check.log
+          pnpm exec tsc --noEmit \
+            2>&1 | tee ../../validation-logs/ts-check.log
 
       - name: ESLint
-        working-directory: apps/web
         run: |
-          pnpm run lint 2>&1 | tee ../../validation-logs/eslint.log
+          pnpm run lint \
+            2>&1 | tee ../../validation-logs/eslint.log
 
       - name: Production build
-        working-directory: apps/web
         run: |
-          pnpm run build 2>&1 | tee ../../validation-logs/build.log
+          pnpm run build \
+            2>&1 | tee ../../validation-logs/build.log
 
       - name: Start development server
-        working-directory: apps/web
         run: |
-          nohup pnpm run dev --host 0.0.0.0 --port 3000 > ../../validation-logs/server.log 2>&1 &
+          nohup pnpm run dev --host 0.0.0.0 --port 3000 \
+            > ../../validation-logs/server.log 2>&1 &
+
           echo $! > ../../server.pid
 
+          echo "Waiting for Vite server..."
+
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:3000/ > /dev/null; then
-              echo "Server started successfully."
+            if curl -sS http://127.0.0.1:3000/ > /dev/null 2>&1; then
+              echo "Server is responding."
               exit 0
             fi
+
             sleep 2
           done
 
-          echo "Server failed to start."
+          echo "Server failed to respond."
+          echo ""
+          echo "===== SERVER LOG ====="
           cat ../../validation-logs/server.log
           exit 1
 
-      - name: Smoke test routes
+      - name: Smoke test /
         run: |
-          set -e
-
           echo "Testing /"
-          curl -f -sS -o /tmp/index.html -w "HTTP %{http_code}\n" http://127.0.0.1:3000/ | tee validation-logs/smoke-tests.log
 
+          status=$(curl -sS -o /tmp/index.html \
+            -w "%{http_code}" \
+            http://127.0.0.1:3000/)
+
+          echo "/ -> HTTP $status" \
+            | tee ../../validation-logs/smoke-tests.log
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 400 ]; then
+            echo "Root route failed."
+            exit 1
+          fi
+
+      - name: Smoke test /dashboard
+        run: |
           echo "Testing /dashboard"
-          curl -f -sS -o /tmp/dashboard.html -w "HTTP %{http_code}\n" http://127.0.0.1:3000/dashboard | tee -a validation-logs/smoke-tests.log
 
+          status=$(curl -sS -o /tmp/dashboard.html \
+            -w "%{http_code}" \
+            http://127.0.0.1:3000/dashboard)
+
+          echo "/dashboard -> HTTP $status" \
+            | tee -a ../../validation-logs/smoke-tests.log
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 400 ]; then
+            echo "Dashboard route failed."
+            exit 1
+          fi
+
+      - name: Smoke test /start
+        run: |
           echo "Testing /start"
-          curl -f -sS -o /tmp/start.html -w "HTTP %{http_code}\n" http://127.0.0.1:3000/start | tee -a validation-logs/smoke-tests.log
 
-          echo "All smoke tests passed."
+          status=$(curl -sS -o /tmp/start.html \
+            -w "%{http_code}" \
+            http://127.0.0.1:3000/start)
+
+          echo "/start -> HTTP $status" \
+            | tee -a ../../validation-logs/smoke-tests.log
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 400 ]; then
+            echo "Start route failed."
+            exit 1
+          fi
+
+      - name: Stop development server
+        if: always()
+        working-directory: .
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi
 
       - name: Upload validation logs
         if: always()
@@ -97,13 +149,22 @@ jobs:
 
       - name: Validation summary
         if: always()
+        working-directory: .
         run: |
           {
             echo "## Praxis frontend validation"
             echo ""
-            echo "- Branch: \`import/frontend\`"
-            echo "- Frontend validation completed."
-            echo "- Lovable source checkout/checksum comparison: skipped"
+            echo "Branch: \`import/frontend\`"
             echo ""
-            echo "See the uploaded \`validation-logs\` artifact for full output."
+            echo "Validation performed:"
+            echo "- pnpm install"
+            echo "- TypeScript"
+            echo "- ESLint"
+            echo "- Production build"
+            echo "- Vite development server"
+            echo "- /"
+            echo "- /dashboard"
+            echo "- /start"
+            echo ""
+            echo "See the \`validation-logs\` artifact for detailed output."
           } >> "$GITHUB_STEP_SUMMARY"
