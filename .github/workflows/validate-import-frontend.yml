@@ -1,0 +1,302 @@
+name: Validate import/frontend
+
+on:
+  push:
+    branches: [ 'import/frontend' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Prepare workspace
+        run: |
+          mkdir -p validation-logs
+
+      - name: Checkout import branch (praxis)
+        uses: actions/checkout@v4
+        with:
+          repository: ar1phv/praxis
+          ref: import/frontend
+          fetch-depth: 0
+          path: praxis-src
+
+      - name: Checkout Lovable source (praxis-ai-studio main)
+        uses: actions/checkout@v4
+        with:
+          repository: ar1phv/praxis-ai-studio
+          ref: main
+          fetch-depth: 0
+          path: lovable-src
+
+      - name: Set up Node and pnpm (Corepack)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Enable Corepack and prepare pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+
+      - name: pnpm install at repository root
+        working-directory: praxis-src
+        id: pnpm_install
+        run: |
+          set -o pipefail
+          LOG=../validation-logs/pnpm-install.log
+          echo "Running: pnpm install (from praxis root)" | tee -a "$LOG"
+          pnpm install 2>&1 | tee -a "$LOG" || EXIT_CODE=$?
+          if [ -n "${EXIT_CODE:-}" ] && [ "$EXIT_CODE" -ne 0 ]; then
+            echo "pnpm install failed with exit code $EXIT_CODE" | tee -a "$LOG"
+            echo "---PNPM_INSTALL_ERROR_START---" >> "$LOG"
+            # print last 200 lines for clarity
+            tail -n 200 "$LOG" >> "$LOG"
+            echo "---PNPM_INSTALL_ERROR_END---" >> "$LOG"
+            echo "pnpm-install:failure" >> "$GITHUB_STEP_SUMMARY"
+            # Do NOT modify files; stop this step and fail the job as required
+            exit $EXIT_CODE
+          fi
+          echo "pnpm-install:success" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          CI: true
+
+      - name: TypeScript check for apps/web
+        working-directory: praxis-src
+        id: ts_check
+        run: |
+          set -o pipefail
+          LOG=../validation-logs/ts-check.log
+          echo "Starting TypeScript validation for apps/web" | tee -a "$LOG"
+          if [ -f apps/web/tsconfig.json ]; then
+            npx -y typescript tsc -p apps/web/tsconfig.json --noEmit 2>&1 | tee -a "$LOG" || EXIT_CODE=$?
+          elif [ -f apps/web/package.json ]; then
+            # prefer a defined script if present
+            if jq -e '.scripts.typecheck' apps/web/package.json >/dev/null 2>&1; then
+              (cd apps/web && pnpm run typecheck) 2>&1 | tee -a "$LOG" || EXIT_CODE=$?
+            elif jq -e '.scripts.build' apps/web/package.json >/dev/null 2>&1; then
+              # try a build with no emit if no typecheck script
+              (cd apps/web && pnpm run build --if-present) 2>&1 | tee -a "$LOG" || EXIT_CODE=$?
+            else
+              echo "No tsconfig.json and no typecheck/build script found for apps/web" | tee -a "$LOG"
+              EXIT_CODE=0
+            fi
+          else
+            echo "apps/web not found; skipping TypeScript check" | tee -a "$LOG"
+            EXIT_CODE=0
+          fi
+          if [ -n "${EXIT_CODE:-}" ] && [ "$EXIT_CODE" -ne 0 ]; then
+            echo "TypeScript validation failed with exit code $EXIT_CODE" | tee -a "$LOG"
+            echo "ts-check:failure" >> "$GITHUB_STEP_SUMMARY"
+            exit $EXIT_CODE
+          else
+            echo "ts-check:success" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: ESLint for apps/web
+        working-directory: praxis-src
+        id: eslint_check
+        run: |
+          set -o pipefail
+          LOG=../validation-logs/eslint.log
+          echo "Starting ESLint for apps/web" | tee -a "$LOG"
+          if [ -f apps/web/package.json ]; then
+            # attempt to run defined eslint script first
+            if jq -e '.scripts.lint' apps/web/package.json >/dev/null 2>&1; then
+              (cd apps/web && pnpm run lint --if-present) 2>&1 | tee -a "$LOG" || EXIT_CODE=$?
+            else
+              npx -y eslint "apps/web/**/*.{js,ts,tsx}" --max-warnings=0 2>&1 | tee -a "$LOG" || EXIT_CODE=$?
+            fi
+          else
+            echo "apps/web not found; skipping ESLint" | tee -a "$LOG"
+            EXIT_CODE=0
+          fi
+          if [ -n "${EXIT_CODE:-}" ] && [ "$EXIT_CODE" -ne 0 ]; then
+            echo "ESLint failed with exit code $EXIT_CODE" | tee -a "$LOG"
+            echo "eslint:failure" >> "$GITHUB_STEP_SUMMARY"
+            exit $EXIT_CODE
+          else
+            echo "eslint:success" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Production build for apps/web
+        working-directory: praxis-src
+        id: build_web
+        run: |
+          set -o pipefail
+          LOG=../validation-logs/build.log
+          echo "Starting production build for apps/web" | tee -a "$LOG"
+          if [ -f apps/web/package.json ]; then
+            (cd apps/web && pnpm run build) 2>&1 | tee -a "$LOG" || EXIT_CODE=$?
+          else
+            echo "apps/web not found; skipping build" | tee -a "$LOG"
+            EXIT_CODE=0
+          fi
+          if [ -n "${EXIT_CODE:-}" ] && [ "$EXIT_CODE" -ne 0 ]; then
+            echo "build:failure" >> "$GITHUB_STEP_SUMMARY"
+            echo "Production build failed with exit code $EXIT_CODE" | tee -a "$LOG"
+            exit $EXIT_CODE
+          else
+            echo "build:success" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Start apps/web and run smoke tests
+        working-directory: praxis-src
+        id: smoke_tests
+        run: |
+          set -o pipefail
+          LOG=../validation-logs/smoke-tests.log
+          echo "Starting production server for apps/web on PORT 3000" | tee -a "$LOG"
+          if [ -f apps/web/package.json ]; then
+            (cd apps/web && PORT=3000 nohup pnpm start > ../../validation-logs/server.log 2>&1 & echo $! > ../../validation-logs/server.pid)
+            # wait for server
+            for i in {1..60}; do
+              if curl -sS http://localhost:3000/ >/dev/null 2>&1; then
+                echo "Server ready" | tee -a "$LOG"
+                break
+              fi
+              sleep 1
+            done
+            if ! curl -sS http://localhost:3000/ >/dev/null 2>&1; then
+              echo "Server did not start within timeout" | tee -a "$LOG"
+              echo "smoke-tests:failure" >> "$GITHUB_STEP_SUMMARY"
+              tail -n 200 ../../validation-logs/server.log | tee -a "$LOG"
+              exit 1
+            fi
+            # endpoints to test
+            ENDPOINTS=("/" "/dashboard" "/start")
+            FAILS=0
+            for ep in "${ENDPOINTS[@]}"; do
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000${ep}") || STATUS=000
+              echo "GET ${ep} -> ${STATUS}" | tee -a "$LOG"
+              if [[ ! "$STATUS" =~ ^(2|3) ]]; then
+                FAILS=$((FAILS+1))
+              fi
+            done
+            if [ "$FAILS" -ne 0 ]; then
+              echo "Some smoke tests failed" | tee -a "$LOG"
+              echo "smoke-tests:failure" >> "$GITHUB_STEP_SUMMARY"
+              # include server log tail
+              tail -n 500 ../../validation-logs/server.log >> "$LOG" || true
+              # stop server
+              kill "$(cat ../../validation-logs/server.pid)" || true
+              exit 1
+            else
+              echo "smoke-tests:success" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            # stop server
+            kill "$(cat ../../validation-logs/server.pid)" || true
+          else
+            echo "apps/web not found; skipping smoke tests" | tee -a "$LOG"
+            echo "smoke-tests:skipped" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Compare checksums between imported and Lovable apps/web
+        working-directory: ${{ github.workspace }}
+        id: checksum_compare
+        run: |
+          set -o pipefail
+          LOG=validation-logs/checksum-compare.log
+          echo "Comparing SHA-256 checksums for apps/web between praxis (import) and praxis-ai-studio (Lovable)" | tee -a "$LOG"
+
+          IMPORT_DIR="praxis-src/apps/web"
+          LOVABLE_DIR="lovable-src/apps/web"
+
+          if [ ! -d "$IMPORT_DIR" ]; then
+            echo "Imported apps/web not found at $IMPORT_DIR" | tee -a "$LOG"
+            echo "checksum-compare:skipped" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ ! -d "$LOVABLE_DIR" ]; then
+            echo "Lovable apps/web not found at $LOVABLE_DIR" | tee -a "$LOG"
+            echo "checksum-compare:skipped" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # prepare file lists (exclude node_modules, build outputs)
+          (cd "$IMPORT_DIR" && find . -type f ! -path './node_modules/*' ! -path './.next/*' -print0 | sort -z) > /tmp/import_files.txt
+          (cd "$LOVABLE_DIR" && find . -type f ! -path './node_modules/*' ! -path './.next/*' -print0 | sort -z) > /tmp/lovable_files.txt
+
+          # produce checksums with relative paths
+          rm -f /tmp/import_checksums.txt /tmp/lovable_checksums.txt
+          if [ -s /tmp/import_files.txt ]; then
+            # read null-delimited
+            while IFS= read -r -d $'\0' file; do
+              sha256sum "$IMPORT_DIR/$file" >> /tmp/import_checksums.txt
+            done < /tmp/import_files.txt
+          fi
+          if [ -s /tmp/lovable_files.txt ]; then
+            while IFS= read -r -d $'\0' file; do
+              sha256sum "$LOVABLE_DIR/$file" >> /tmp/lovable_checksums.txt
+            done < /tmp/lovable_files.txt
+          fi
+
+          # sort by filename (sha256sum outputs: <hash>  <path>)
+          sort -k2 /tmp/import_checksums.txt > /tmp/import_checksums_sorted.txt || true
+          sort -k2 /tmp/lovable_checksums.txt > /tmp/lovable_checksums_sorted.txt || true
+
+          # extract filenames
+          awk '{ $1=""; sub(/^\s+/,"",$0); print $0 }' /tmp/import_checksums_sorted.txt | sed 's/^\.\///' > /tmp/import_files_sorted.txt || true
+          awk '{ $1=""; sub(/^\s+/,"",$0); print $0 }' /tmp/lovable_checksums_sorted.txt | sed 's/^\.\///' > /tmp/lovable_files_sorted.txt || true
+
+          # find missing and extra files
+          comm -23 /tmp/import_files_sorted.txt /tmp/lovable_files_sorted.txt > /tmp/extra_in_import.txt || true
+          comm -13 /tmp/import_files_sorted.txt /tmp/lovable_files_sorted.txt > /tmp/missing_in_import.txt || true
+
+          # find modified files: files present in both but with different checksums
+          join -j2 <(awk '{print $2"\t"$1}' /tmp/import_checksums_sorted.txt | sort -k1) <(awk '{print $2"\t"$1}' /tmp/lovable_checksums_sorted.txt | sort -k1) | awk -F"\t" '$2!=$3 {print $1"\t"$2"\t"$3}' > /tmp/modified_files.txt || true
+
+          echo "EXTRA in import (present in import, not in lovable):" | tee -a "$LOG"
+          cat /tmp/extra_in_import.txt | tee -a "$LOG" || true
+
+          echo "MISSING in import (present in lovable, not in import):" | tee -a "$LOG"
+          cat /tmp/missing_in_import.txt | tee -a "$LOG" || true
+
+          echo "MODIFIED files (path, import_sha, lovable_sha):" | tee -a "$LOG"
+          cat /tmp/modified_files.txt | tee -a "$LOG" || true
+
+          # Record summary status
+          if [ -s /tmp/extra_in_import.txt ] || [ -s /tmp/missing_in_import.txt ] || [ -s /tmp/modified_files.txt ]; then
+            echo "checksum-compare:differences_found" >> "$GITHUB_STEP_SUMMARY"
+            echo "differences_found" > validation-logs/checksum-result.txt
+          else
+            echo "checksum-compare:identical" >> "$GITHUB_STEP_SUMMARY"
+            echo "identical" > validation-logs/checksum-result.txt
+          fi
+
+          # Save detailed artifacts
+          mv /tmp/import_checksums_sorted.txt validation-logs/import_checksums_sorted.txt || true
+          mv /tmp/lovable_checksums_sorted.txt validation-logs/lovable_checksums_sorted.txt || true
+          mv /tmp/extra_in_import.txt validation-logs/extra_in_import.txt || true
+          mv /tmp/missing_in_import.txt validation-logs/missing_in_import.txt || true
+          mv /tmp/modified_files.txt validation-logs/modified_files.txt || true
+
+          echo "Checksum comparison complete" | tee -a "$LOG"
+
+      - name: Upload validation logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-logs
+          path: validation-logs
+
+      - name: Final concise summary
+        run: |
+          echo "--- Validation summary ---" > summary.txt
+          # The workflow has appended brief tags to the $GITHUB_STEP_SUMMARY earlier; also include key logs
+          cat "$GITHUB_STEP_SUMMARY" | sed '/^$/d' >> summary.txt || true
+          echo "" >> summary.txt
+          echo "Checksum result:" >> summary.txt
+          if [ -f validation-logs/checksum-result.txt ]; then
+            cat validation-logs/checksum-result.txt >> summary.txt
+          else
+            echo "checksum:unknown" >> summary.txt
+          fi
+          echo "" >> summary.txt
+          echo "Artifacts: validation-logs (uploaded)" >> summary.txt
+          # Append the concise summary to the Actions summary
+          echo "$(cat summary.txt)" >> $GITHUB_STEP_SUMMARY
+          cat summary.txt
+
