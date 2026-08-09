@@ -1,0 +1,7 @@
+# Root workspace config updated to include apps/web
+{
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
