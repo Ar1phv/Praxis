@@ -1,1 +1,3 @@
-// vite.config copied already
+import { defineConfig } from "vite";
+
+export default defineConfig({});
