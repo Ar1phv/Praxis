@@ -1,0 +1,1 @@
+/* Minimal placeholder to indicate Lovable source imported. */

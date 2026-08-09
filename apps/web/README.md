@@ -1,5 +1,2 @@
-# apps/web
 
-This directory will contain the Next.js frontend for Praxis.
-
-Status: placeholder for Phase 0. Do not implement the app yet.
+# Placeholder README for the imported Lovable frontend. Replace with the full README on finalization.
