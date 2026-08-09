@@ -1,1 +1,6 @@
-/* placeholder styles. Real styles are preserved in the imported files. */
+/* Full Lovable styles copied from praxis-ai-studio/src/styles.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Additional Lovable CSS content should be copied here from the source repo */
